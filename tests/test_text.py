@@ -30,3 +30,40 @@ def test_policy_date():
     assert policy_date("Privacy Policy\nLast updated: 12 March 2026\n...") == "12 March 2026"
     assert policy_date("Effective date: October 13, 2026") == "October 13, 2026"
     assert policy_date("No date here at all.") is None
+
+
+from mappa.text import find_quote, segment, sentences  # noqa: E402
+
+POLICY = ("Privacy Policy\nInformation we collect\n"
+          "We collect your email address. We do not sell it, e.g. to Acme Inc. or anyone else.\n"
+          "We may collect:\nName\nEmail\nLocation (GPS)\nThat is everything we collect from you here.")
+
+
+def test_segment_joins_headings_and_lead_ins_and_covers_the_text():
+    spans = segment(POLICY)
+    texts = [POLICY[s:e] for s, e in spans]
+    assert texts[0].startswith("Privacy Policy\nInformation we collect\nWe collect your email")
+    assert texts[1].startswith("We may collect:\nName") and texts[1].endswith("from you here.")
+    assert all(POLICY[e:s2].strip() == "" for (_, e), (s2, _) in zip(spans, spans[1:]))  # contiguous
+
+
+def test_segment_splits_long_blocks_at_sentences():
+    long = " ".join(f"Sentence number {i} is here." for i in range(100))  # 500 words, one line
+    spans = segment(long, max_words=200)
+    assert len(spans) == 3 and all(len(long[s:e].split()) <= 200 for s, e in spans)
+    assert all(long[s:e].endswith(".") for s, e in spans)
+
+
+def test_sentences_respect_abbreviations():
+    got = [POLICY[s:e] for s, e in sentences(POLICY)]
+    assert "We do not sell it, e.g. to Acme Inc. or anyone else." in got
+
+
+def test_find_quote_normalises_but_never_fuzzes():
+    text = "We do not sell your “personal information” to anyone, ever.\nName"
+    span, why = find_quote('WE DO NOT SELL YOUR "PERSONAL INFORMATION" TO ANYONE.', text)
+    assert why == "ok" and text[span[0]:span[1]].startswith("We do") and text[span[0]:span[1]].endswith("anyone")
+    assert find_quote("We do not sell your data to anyone", text) == (None, "not_found")
+    assert find_quote("We do not sell ... to anyone", text) == (None, "elided")
+    assert find_quote("sell your", text) == (None, "too_short")
+    assert find_quote("Name", text)[1] == "ok"  # short, but a whole line (a list item)

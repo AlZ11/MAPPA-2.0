@@ -14,6 +14,13 @@ python -m mappa snapshot --run s1a --from d1      # freeze details, label and po
 python -m mappa status --run s1a --manifest s1a.csv
 python -m mappa labels --run s1a                  # Data Safety pages -> evidence rows
 python -m mappa show --run s1a --app com.calm.android
+
+python -m mappa train                             # baseline policy reader (downloads APP-350, OPP-115)
+python -m mappa read --run s1a                    # policies -> evidence rows (--extractor llm for the local model)
+python -m mappa evaluate                          # precision/recall/F1 on APP-350, OPP-115, unibo test sets
+python -m mappa annotate --run s1a --apps com.calm.android,... --out sheet.csv   # hand-labelling sheet + codebook
+python -m mappa kappa sheet_a.csv sheet_b.csv     # agreement between two annotators
+python -m mappa evaluate --corpus indomain --gold adjudicated.csv
 python -m pytest -q
 ```
 

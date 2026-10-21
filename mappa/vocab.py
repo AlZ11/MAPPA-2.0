@@ -109,6 +109,18 @@ RULES: dict[str, re.Pattern] = {
     "breach_notification": re.compile(r"(?:data|security) breach|notifiable", re.I),
 }
 
+# No public corpus has enough health-data labels to train on (OPP-115's are almost all in one hospital
+# policy, which sits in its test split), so the baseline finds health data flows with keywords.
+HEALTH_TERMS = re.compile(
+    r"health|medical|fitness|symptom|diagnos|medication|prescription|heart rate|blood pressure|glucose"
+    r"|blood sugar|\bweight\b|\bBMI\b|step count|sleep|menstrua|pregnan|fertility|ovulation|\bmood\b"
+    r"|mental|calorie|nutrition|exercise|workout|biometric",
+    re.I,
+)
+DATA_VERBS = re.compile(r"\b(?:collect|gather|obtain|receiv|record|stor|track|process|use|uses|share|disclos|transfer"
+                        r"|sell|provid|access)", re.I)
+SHARE_WORDS = re.compile(r"\b(?:share|disclos|transfer|sell|third[- ]part|partners?\b)", re.I)
+
 
 @dataclass(frozen=True)
 class Claim:
