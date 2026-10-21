@@ -1,0 +1,13 @@
+# APP-350 is research-only licensed: never commit its text, labels or anything derived from it.
+APP-350*/
+data/
+results/
+*.yml
+
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/

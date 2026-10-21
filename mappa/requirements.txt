@@ -1,0 +1,4 @@
+requests
+anthropic
+pydantic>=2
+PyYAML
