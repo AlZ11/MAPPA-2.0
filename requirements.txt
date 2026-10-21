@@ -1,0 +1,8 @@
+requests
+beautifulsoup4
+lxml
+scikit-learn
+pyyaml
+pytest
+# optional: renders policy pages that are built by JavaScript (then: playwright install chromium)
+# playwright

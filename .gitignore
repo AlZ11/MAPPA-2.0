@@ -1,1 +1,8 @@
-
+# Collected data, third-party datasets, caches and results: never committed.
+data/
+*.db
+__pycache__/
+.pytest_cache/
+.venv/
+.env
+.DS_Store
