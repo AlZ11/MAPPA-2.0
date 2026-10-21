@@ -146,8 +146,16 @@ def normalise(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def quote_found(quote: str, policy_norm: str) -> bool:
-    return normalise(quote) in policy_norm
+def quote_found(quote: str, policy_lower: str) -> bool:
+    """Every word of the quote must appear in the policy, in order, with nothing in between.
+
+    Two differences are forgiven, because they change no words: capital letters, and punctuation
+    at the very end. Models often quote half of a sentence at a comma and then add a full stop
+    ("We do not sell your personal information to anyone.") or capitalise its first word. Without
+    this, exactly the denials the consistency engine needs were being thrown away. A quote with
+    "..." or any changed word still fails.
+    """
+    return normalise(quote).rstrip(" .,;:").casefold() in policy_lower
 
 
 # ---------------------------------------------------------------- extraction
@@ -238,7 +246,7 @@ def read_policy(text: str, llm: Callable[[str, str], LLMResult] = call_llm,
                 continue
 
             # 2. The quote must exist in the policy, or the model made it up.
-            if not quote_found(row.quote, policy_norm):
+            if not quote_found(row.quote, policy_lower):
                 stats.fabricated_quotes += 1
                 dropped.append({"reason": "fabricated_quote", "row": item})
                 continue
@@ -273,7 +281,7 @@ def read_policy(text: str, llm: Callable[[str, str], LLMResult] = call_llm,
                 stats.invalid_claims += 1
                 dropped.append({"reason": "invalid_claim", "row": item, "error": str(e.errors()[0]["msg"])})
                 continue
-            if not quote_found(claim.quote, policy_norm):
+            if not quote_found(claim.quote, policy_lower):
                 stats.fabricated_claim_quotes += 1
                 dropped.append({"reason": "fabricated_claim_quote", "row": item})
                 continue

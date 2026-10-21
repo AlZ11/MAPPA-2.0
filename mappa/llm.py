@@ -5,9 +5,13 @@ function into read_policy(). Each backend returns the same LLMResult, so nothing
 knows or cares which model answered.
 """
 
+import hashlib
+import json
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Callable
 
 PROVIDER = os.environ.get("MAPPA_PROVIDER", "groq")
 
@@ -116,3 +120,43 @@ def call_anthropic(system: str, user: str) -> LLMResult:
 
 def call_llm(system: str, user: str) -> LLMResult:
     return call_groq(system, user) if PROVIDER == "groq" else call_anthropic(system, user)
+
+
+# ---------------------------------------------------------------- raw output log + replay
+# The spec's "temperature 0" can't make runs identical, so reproducibility comes from keeping every
+# raw reply. Each call is stored under a hash of exactly what was sent (prompt + excerpt): replaying
+# a run gives the same rows with no API call, and re-scoring old runs after a code change is free.
+
+LLM = Callable[[str, str], LLMResult]
+
+
+def call_key(system: str, user: str) -> str:
+    return hashlib.sha256(f"{system}\x00{user}".encode()).hexdigest()[:16]
+
+
+def recording(llm: LLM, path: Path) -> LLM:
+    """Wrap an LLM so every reply is appended to a JSONL file (one line per call)."""
+    def wrapped(system: str, user: str) -> LLMResult:
+        res = llm(system, user)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"key": call_key(system, user), **asdict(res)}) + "\n")
+        return res
+    return wrapped
+
+
+def replay(path: Path) -> LLM:
+    """An 'LLM' that answers from a recording. Fails if asked something that was never recorded,
+    e.g. because the prompt changed since the recording was made."""
+    saved: dict[str, list[LLMResult]] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        rec = json.loads(line)
+        saved.setdefault(rec.pop("key"), []).append(LLMResult(**rec))
+
+    def llm(system: str, user: str) -> LLMResult:
+        # A call that was retried has several replies; hand them out in the order they came.
+        replies = saved.get(call_key(system, user))
+        if not replies:
+            raise KeyError("no recorded reply for this call: the prompt or policy changed, re-record it")
+        return replies.pop(0) if len(replies) > 1 else replies[0]
+    return llm

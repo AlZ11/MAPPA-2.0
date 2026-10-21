@@ -9,7 +9,6 @@ Usage:
     python eval.py oracle [n_policies]   # no API calls: checks the pipeline + scoring with a fake LLM
 """
 
-import hashlib
 import json
 import sys
 import time
@@ -18,31 +17,35 @@ from pathlib import Path
 
 from app350 import Policy, load_policy, policy_ids
 from mappings import EVALUABLE
-from llm import GROQ_MODEL, LLMResult, call_llm
-from policy_reader import FIRST_PARTY, SYSTEM_PROMPT, PolicyResult, Stats, read_policy
-from schema import Row
+from llm import GROQ_MODEL, LLMResult, call_llm, recording, replay
+from policy_reader import FIRST_PARTY, PolicyResult, read_policy
 
 # Run outputs quote APP-350 text, so they stay local (licence: no redistribution).
 RESULTS_DIR = Path(__file__).parent / "results"
 
 # Groq's free tier caps tokens per day (about 40 policies' worth), so a 100-policy eval spans days.
-# Each policy's result is saved under a key made from the model + prompt: rerunning the same
-# command picks up where it stopped, and any prompt edit gets a fresh key (no stale reuse).
-CACHE_DIR = RESULTS_DIR / "cache" / hashlib.sha256((GROQ_MODEL + SYSTEM_PROMPT).encode()).hexdigest()[:12]
+# Every raw reply is saved, per model and policy. On a rerun, any call already answered (same prompt,
+# same excerpt) is replayed from disk instead of re-sent: the run picks up where it stopped, a prompt
+# edit automatically means fresh calls, and the checks and scoring always re-run on current code.
+RAW_DIR = RESULTS_DIR / "raw" / GROQ_MODEL.replace("/", "_")
 
 
-def read_cached(policy: Policy) -> PolicyResult:
-    path = CACHE_DIR / f"policy_{policy.policy_id}.json"
-    if path.exists():
-        saved = json.loads(path.read_text())
-        return PolicyResult([Row(**r) for r in saved["rows"]], Stats(**saved["stats"]), saved["dropped"])
+def read_with_cache(policy: Policy) -> PolicyResult:
+    path = RAW_DIR / f"policy_{policy.policy_id}.jsonl"
+    saved = replay(path) if path.exists() else None
+    live = recording(call_llm, path)
+
+    def llm(system: str, user: str) -> LLMResult:
+        if saved is not None:
+            try:
+                return saved(system, user)
+            except KeyError:
+                pass
+        return live(system, user)
+
     # APP-350 has no labels for the claims pass, so skip it here: it would double the API calls
     # for output nothing can score.
-    result = read_policy(policy.text, llm=call_llm, claims=False)
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"rows": [r.model_dump() for r in result.rows],
-                                "stats": asdict(result.stats), "dropped": result.dropped}))
-    return result
+    return read_policy(policy.text, llm=llm, claims=False)
 
 
 def predicted(result: PolicyResult) -> tuple[set[str], set[tuple[str, str]], set[str]]:
@@ -124,7 +127,7 @@ def run(n: int, oracle: bool = False) -> None:
     for pid in ids:
         policy = load_policy(pid)
         t0 = time.time()
-        result = read_policy(policy.text, llm=oracle_llm(policy), claims=False) if oracle else read_cached(policy)
+        result = read_policy(policy.text, llm=oracle_llm(policy), claims=False) if oracle else read_with_cache(policy)
         s = result.stats
         types, pairs, denied = predicted(result)
 
