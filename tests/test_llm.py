@@ -88,7 +88,19 @@ def test_falls_back_when_server_rejects_json_schema(server):
     server.replies = replies
     LLM(model="m", base_url="http://x", tasks=("flows",)).extract(POLICY, [(0, len(POLICY))])
     assert [c.get("response_format", {}).get("type") for c in server.calls] == ["json_schema", "json_object"]
-    assert "matching this JSON schema" in server.calls[1]["messages"][0]["content"]
+    assert "schema" in server.calls[1]["response_format"]  # llama.cpp's spelling of schema-constrained JSON
+
+
+def test_falls_back_to_plain_json_when_schemas_are_unsupported(server):
+    def replies(task, body):
+        fmt = body.get("response_format", {})
+        if fmt.get("type") == "json_schema" or "schema" in fmt:
+            return FakeResponse(500, {"error": "response_format: Input should be 'text' or 'json_object'"})
+        return reply([])
+    server.replies = replies
+    LLM(model="m2", base_url="http://y", tasks=("flows",)).extract(POLICY, [(0, len(POLICY))])
+    assert server.calls[-1]["response_format"] == {"type": "json_object"}
+    assert "matching this JSON schema" in server.calls[-1]["messages"][0]["content"]
 
 
 def test_cache_replays_answers_but_not_across_repetitions(server, tmp_path):

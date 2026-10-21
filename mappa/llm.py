@@ -3,9 +3,9 @@
 Ollama, LM Studio, vLLM and llama.cpp all serve the same "OpenAI-compatible" HTTP API, so one small
 function covers them all (a hosted service such as Groq works too: set MAPPA_LLM_API_KEY).
 
-Asking for JSON: the best servers accept a JSON schema and force the reply to fit it ("json_schema").
-Others only promise valid JSON ("json_object"), and some only follow instructions ("prompt"). We try them
-in that order, remember which one works, and always check the reply ourselves either way.
+Asking for JSON: the best servers accept a JSON schema and force the reply to fit it ("json_schema"; llama.cpp's
+server spells it json_object + schema). Others only promise valid JSON ("json_object"), and some only follow
+instructions ("prompt"). We try them in that order, remember which one works, and check every reply ourselves anyway.
 
 Every reply is saved under data/cache/llm, keyed by a hash of the exact request. Re-running an evaluation
 replays saved answers instead of recomputing them, and the saved files are the record of what the model said.
@@ -23,7 +23,7 @@ import requests
 DEFAULT_URL = os.environ.get("MAPPA_LLM_URL", "http://localhost:11434/v1")  # Ollama's default address
 DEFAULT_MODEL = os.environ.get("MAPPA_LLM_MODEL", "qwen2.5:7b-instruct")
 API_KEY = os.environ.get("MAPPA_LLM_API_KEY")  # only for hosted endpoints
-MODES = ("json_schema", "json_object", "prompt")
+MODES = ("json_schema", "json_object_schema", "json_object", "prompt")
 _working_mode: dict[tuple[str, str], int] = {}
 
 
@@ -48,6 +48,8 @@ def chat_json(messages: list[dict], schema: dict, *, model: str, base_url: str, 
         body = dict(base)
         if mode == "json_schema":
             body["response_format"] = {"type": "json_schema", "json_schema": {"name": "claims", "schema": schema, "strict": True}}
+        elif mode == "json_object_schema":
+            body["response_format"] = {"type": "json_object", "schema": schema}
         else:
             body["messages"] = _with_schema(messages, schema)
             if mode == "json_object":
@@ -55,8 +57,8 @@ def chat_json(messages: list[dict], schema: dict, *, model: str, base_url: str, 
         t0 = time.monotonic()
         r = _post(f"{base_url.rstrip('/')}/chat/completions", body, timeout)
         seconds = time.monotonic() - t0
-        if r.status_code in (400, 422):  # this server does not support this way of asking for JSON
-            continue
+        if r.status_code in (400, 422) or (r.status_code >= 500 and "response_format" in r.text):
+            continue  # this server does not support this way of asking for JSON (llama.cpp answers 500)
         if r.status_code != 200:
             raise LLMError(f"HTTP {r.status_code}: {r.text[:300]}")
         reply = r.json()
@@ -91,7 +93,7 @@ def _post(url: str, body: dict, timeout: int) -> requests.Response:
         if r.status_code == 429 and attempt < 5:
             time.sleep(min(float(r.headers.get("retry-after") or 2 ** attempt), 120))
             continue
-        if r.status_code >= 500 and attempt < 2:
+        if r.status_code >= 500 and attempt < 2 and "response_format" not in r.text:
             time.sleep(2 ** attempt)
             continue
         return r
