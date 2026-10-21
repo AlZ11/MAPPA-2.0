@@ -122,7 +122,12 @@ def _post(url: str, body: dict, timeout: int) -> tuple[requests.Response, float]
         seconds = time.monotonic() - t0
         if r.status_code == 429:
             if re.search(r"per ?day|PerDay|daily", r.text, re.I):
-                raise LLMStop(f"daily quota used up: {_error_message(r)}. Cached answers are kept; re-run later.")
+                limit = re.search(r"limit: (\d+), model: ([\w.-]+)", r.text)
+                when = re.search(r"retry in ([\dhms.]+?)\d*\.?\d*s\b", r.text)
+                raise LLMStop("daily quota used up" + (f" ({limit[1]} requests/day for {limit[2]})" if limit else "")
+                              + (f"; it resets in about {when[1]}" if when else "")
+                              + ". Cached answers are kept, so re-running later carries on. More quota: enable billing,"
+                              " or use --model with another model (each model has its own quota).")
             if attempt < 6:
                 time.sleep(_retry_wait(r, attempt))
                 continue
