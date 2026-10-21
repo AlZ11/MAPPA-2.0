@@ -1,10 +1,9 @@
 """Command line: python -m mappa <command> --help"""
 
 import argparse
-
 from pathlib import Path
 
-from . import collect, evaluate, label_reader, policy_reader
+from . import collect, evaluate, label_reader, llm, policy_reader
 from .store import Store
 
 
@@ -48,6 +47,11 @@ def main() -> None:
     s.add_argument("--subset", type=int, help="only the first N documents of each corpus")
     add_extractor_args(s)
 
+    s = sub.add_parser("demo", help="walk through one gold-labelled policy: expert labels vs the reader's claims")
+    s.add_argument("--corpus", default="app350", choices=["app350", "opp115"])
+    s.add_argument("--doc", help="policy id (default: a readable test policy with many labels)")
+    add_extractor_args(s)
+
     s = sub.add_parser("annotate", help="write a blank annotation sheet for hand-labelling policies")
     s.add_argument("--run", required=True)
     s.add_argument("--apps", required=True, help="comma-separated app ids")
@@ -58,6 +62,13 @@ def main() -> None:
     s.add_argument("sheet_b", type=Path)
 
     a = p.parse_args()
+    try:
+        run(a)
+    except llm.LLMStop as e:
+        raise SystemExit(f"stopped: {e}")
+
+
+def run(a) -> None:
     store = Store(a.data)
     if a.cmd == "discover":
         n = collect.discover(store, a.run)
@@ -83,6 +94,8 @@ def main() -> None:
                                    reps=a.reps, subset=a.subset, gold_path=a.gold)
         evaluate.print_report(report)
         print(f"\nsaved {evaluate.save_report(report, store.root)}")
+    elif a.cmd == "demo":
+        evaluate.demo(make_extractor(a, store), a.corpus, store.root, a.doc)
     elif a.cmd == "annotate":
         evaluate.annotate(store, a.run, a.apps.split(","), a.out)
     elif a.cmd == "kappa":
@@ -91,8 +104,8 @@ def main() -> None:
 
 def add_extractor_args(s) -> None:
     s.add_argument("--extractor", default="baseline", choices=["baseline", "llm"])
-    s.add_argument("--model", help="LLM model name (default: $MAPPA_LLM_MODEL or qwen2.5:7b-instruct)")
-    s.add_argument("--base-url", help="OpenAI-compatible endpoint (default: $MAPPA_LLM_URL or Ollama on localhost)")
+    s.add_argument("--model", help="Gemini model (default: $MAPPA_LLM_MODEL or gemini-3.8-flash)")
+    s.add_argument("--base-url", help="another OpenAI-compatible endpoint instead of Gemini (default: $MAPPA_LLM_URL)")
 
 
 def make_extractor(a, store: Store):

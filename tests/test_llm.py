@@ -30,9 +30,11 @@ def server(monkeypatch):
 
     class Server:
         replies = None
+        headers = []
 
     def post(url, json=None, headers=None, timeout=None):
         calls.append(json)
+        Server.headers.append(headers)
         task = "flows" if "turn what it says about personal data" in json["messages"][0]["content"] else "practices"
         return Server.replies(task, json)
 
@@ -80,27 +82,47 @@ def test_unparseable_reply_is_a_failed_window(server):
     assert claims == [] and stats["failed_windows"] == 1 and stats["dropped"] == {"unparseable": 1}
 
 
-def test_falls_back_when_server_rejects_json_schema(server):
+def test_falls_back_when_the_model_rejects_json_schema(server):
     def replies(task, body):
         if body.get("response_format", {}).get("type") == "json_schema":
-            return FakeResponse(400, {"error": "response_format json_schema not supported"})
+            return FakeResponse(400, {"error": {"message": "response_format json_schema is not supported"}})
         return reply([])
     server.replies = replies
     LLM(model="m", base_url="http://x", tasks=("flows",)).extract(POLICY, [(0, len(POLICY))])
     assert [c.get("response_format", {}).get("type") for c in server.calls] == ["json_schema", "json_object"]
-    assert "schema" in server.calls[1]["response_format"]  # llama.cpp's spelling of schema-constrained JSON
+    assert "matching this JSON schema" in server.calls[1]["messages"][0]["content"]
 
 
-def test_falls_back_to_plain_json_when_schemas_are_unsupported(server):
-    def replies(task, body):
-        fmt = body.get("response_format", {})
-        if fmt.get("type") == "json_schema" or "schema" in fmt:
-            return FakeResponse(500, {"error": "response_format: Input should be 'text' or 'json_object'"})
-        return reply([])
-    server.replies = replies
-    LLM(model="m2", base_url="http://y", tasks=("flows",)).extract(POLICY, [(0, len(POLICY))])
-    assert server.calls[-1]["response_format"] == {"type": "json_object"}
-    assert "matching this JSON schema" in server.calls[-1]["messages"][0]["content"]
+def test_bad_key_stops_the_run_instead_of_cycling_modes(server):
+    server.replies = lambda task, body: FakeResponse(400, [{"error": {"message": "API key not valid. Please pass a valid API key."}}])
+    with pytest.raises(llm.LLMStop, match="API key not valid"):
+        LLM(model="m", base_url="http://x", tasks=("flows",)).extract(POLICY, [(0, len(POLICY))])
+    assert len(server.calls) == 1
+
+
+def test_gemini_needs_a_key_and_sends_it(server, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("MAPPA_LLM_API_KEY", raising=False)
+    with pytest.raises(SystemExit, match="GEMINI_API_KEY"):
+        LLM()  # the default endpoint is Gemini's
+    monkeypatch.setenv("GEMINI_API_KEY", "k-123")
+    server.replies = lambda task, body: reply([])
+    LLM(tasks=("flows",)).extract(POLICY, [(0, len(POLICY))])
+    assert server.headers[-1]["Authorization"] == "Bearer k-123"
+    assert server.calls[-1]["reasoning_effort"] == "low" and server.calls[-1]["model"] == llm.DEFAULT_MODEL
+
+
+def test_rate_limits_wait_as_asked_and_daily_quota_stops(server, monkeypatch):
+    waits = []
+    monkeypatch.setattr(llm.time, "sleep", waits.append)
+    replies = iter([FakeResponse(429, {"error": {"message": "Resource exhausted", "details": [{"retryDelay": "7s"}]}}),
+                    reply([FLOW])])
+    server.replies = lambda task, body: next(replies)
+    claims, _ = LLM(model="m", base_url="http://x", tasks=("flows",)).extract(POLICY, [(0, len(POLICY))])
+    assert waits == [8.0] and len(claims) == 1
+    server.replies = lambda task, body: FakeResponse(429, {"error": {"message": "Quota exceeded for GenerateRequestsPerDayPerProjectPerModel"}})
+    with pytest.raises(llm.LLMStop, match="daily quota"):
+        LLM(model="m2", base_url="http://x", tasks=("flows",)).extract(POLICY, [(0, len(POLICY))])
 
 
 def test_cache_replays_answers_but_not_across_repetitions(server, tmp_path):

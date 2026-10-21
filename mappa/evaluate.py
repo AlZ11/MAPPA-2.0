@@ -271,6 +271,123 @@ def save_report(report: dict, root: Path) -> Path:
     return path
 
 
+# ---------------------------------------------------------------- one policy, explained
+MARKS = {"found": "✓", "false_alarm": "+", "missed": "−", "not_judged": "·"}
+LEGEND = """How to read this:
+  ✓ found        the experts labelled it and the reader found it
+  + false alarm  the reader claimed it, but the experts did not label it
+  − missed       the experts labelled it, the reader did not find it
+  · not judged   outside what this corpus labels (e.g. APP-350 never labels health data), so neither right nor wrong
+Each claim shows the policy text the reader quoted as its evidence."""
+
+
+def _demo_label(c: Claim) -> tuple | None:
+    if c.kind == "practice":
+        return ("practice", c.practice, c.polarity)
+    if c.kind == "flow" and c.action:
+        return ("flow", c.category, _act(c.action), c.polarity)
+    if c.kind == "flow" and c.category not in (None, "*"):
+        return ("mention", c.category)
+    return None
+
+
+def _label_text(label: tuple) -> str:
+    kind, *rest = label
+    if kind == "flow":
+        category, action, polarity = rest
+        return f"{'NOT ' if polarity == 'deny' else ''}{action} {category}"
+    if kind == "practice":
+        practice, polarity = rest
+        return f"{'NOT ' if polarity == 'deny' else ''}{practice}"
+    return f"mentions {rest[0]}"
+
+
+def compare(doc: GoldDoc, claims: list[Claim], corpus: str) -> list[dict]:
+    """Per segment: what the experts labelled next to what the reader claimed, each marked as in MARKS."""
+    scope = SCOPE[corpus]
+    by_seg = defaultdict(list)
+    for c in claims:
+        by_seg[c.seg].append(c)
+    rows = []
+    for i, ((s, e), gold) in enumerate(zip(doc.spans, doc.gold)):
+        expert = {lab for g in gold if (j := scope(g)) is not None and (lab := _demo_label(j))}
+        items, judged = [], set()
+        for c in by_seg.get(i, []):
+            shown = _demo_label(c)
+            if shown is None:
+                continue
+            j = scope(c)
+            if j is None:
+                items.append(("not_judged", shown, c.quote))
+            else:
+                lab = _demo_label(j)
+                judged.add(lab)
+                items.append(("found" if lab in expert else "false_alarm", shown, c.quote))
+        items += [("missed", lab, None) for lab in sorted(expert - judged, key=str)]
+        if items:
+            rows.append({"seg": i, "text": doc.text[s:e], "items": items})
+    return rows
+
+
+def pick_demo_doc(docs: list[GoldDoc], corpus: str, max_words: int = 2500) -> GoldDoc:
+    """A readable policy with plenty going on: under max_words, with the most distinct expert labels."""
+    scope = SCOPE[corpus]
+
+    def variety(d: GoldDoc) -> int:
+        return len({_demo_label(j) for g in d.gold for c in g if (j := scope(c)) is not None})
+
+    short = [d for d in docs if len(d.text.split()) <= max_words] or docs
+    return max(short, key=variety)  # max() keeps the first (lowest id) on ties, so the pick is repeatable
+
+
+def demo(extractor, corpus: str, root: Path, doc_id: str | None = None, split: str = "test") -> None:
+    docs = load(corpus, root, split)
+    if doc_id:
+        doc = next((d for d in docs if d.doc_id == doc_id), None)
+        if doc is None:
+            raise SystemExit(f"no {corpus} {split} policy with id {doc_id}")
+    else:
+        doc = pick_demo_doc(docs, corpus)
+    claims, stats = extractor.extract(doc.text, doc.spans)
+    claims = segment_of(claims, doc.spans)
+
+    print(LEGEND)
+    print(f"\n== {corpus} {split} policy {doc.doc_id} ({doc.name}): {len(doc.text.split())} words, "
+          f"{len(doc.spans)} paragraphs | reader: {extractor.name} ({extractor.model}) ==")
+    rows = compare(doc, claims, corpus)
+    for row in rows:
+        preview = " ".join(row["text"].split())
+        print(f"\n[paragraph {row['seg']}] {preview[:220]}{'...' if len(preview) > 220 else ''}")
+        for mark, label, quote in row["items"]:
+            evidence = f'  "{" ".join(quote.split())[:110]}"' if quote else ""
+            print(f"   {MARKS[mark]} {_label_text(label):42}{evidence}")
+    print(f"\n{len(rows)} of {len(doc.spans)} paragraphs had something to show; the rest said nothing the "
+          "experts or the reader labelled.")
+
+    print("\n== Whole policy: does it say X anywhere? ==")
+    for proj, levels in score([doc], [claims], corpus).items():
+        if proj in ("subtype", "purpose"):  # finer diagnostics; see `evaluate` for those
+            continue
+        rows_ = [r for r in levels["L1"]["labels"] if r["tp"] + r["fp"] + r["fn"]]
+        if not rows_:
+            continue
+        m = levels["L1"]["micro"]
+        print(f"{proj}: precision {_fmt(m['p'])}, recall {_fmt(m['r'])}, F1 {_fmt(m['f1'])}")
+        for r in rows_:
+            lab = " / ".join(map(str, r["label"])) if isinstance(r["label"], tuple) else r["label"]
+            verdict = "found" if r["tp"] else ("false alarm" if r["fp"] else "missed")
+            print(f"   {lab:40} {verdict}")
+    if extractor.name == "llm":
+        quote_fail = sum(stats["dropped"].get(k, 0) for k in ("not_found", "too_short", "elided"))
+        print(f"\n== The copied-quote check ==\n{quote_fail} claims were thrown away because their quote is not in the "
+              f"policy ({stats['kept']} kept). Examples:")
+        for why, quote in stats.get("rejected_examples", []):
+            print(f'   [{why}] "{quote[:140]}"')
+        replayed = f" ({stats['cached_windows']} answers replayed from cache)" if stats["cached_windows"] else ""
+        print(f"{stats['windows']} model calls, {stats['failed_windows']} failed; "
+              f"{stats['prompt_tokens'] + stats['completion_tokens']} tokens; {stats['seconds']:.0f}s{replayed}")
+
+
 # ---------------------------------------------------------------- human annotation
 CODEBOOK_HEADER = """MAPPA annotation codebook. One row per policy segment; write codes in the `codes` column, separated by ';'.
 Annotate independently and without looking at any model output.

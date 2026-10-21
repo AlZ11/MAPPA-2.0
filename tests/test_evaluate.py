@@ -53,3 +53,16 @@ def test_opp115_cannot_judge_practice_polarity():
     doc = GoldDoc("opp115", "1", "test", "a", [(0, 1)], [{Claim(kind="practice", practice="retention")}])
     denied = Claim(kind="practice", practice="retention", polarity="deny", seg=0)
     assert score([doc], [[denied]], "opp115")["practice"]["L1"]["micro"]["f1"] == 1.0
+
+
+def test_demo_marks_found_missed_false_alarm_and_not_judged():
+    from mappa.evaluate import compare
+    share_email = Claim(kind="flow", category="Personal info", subtype="Email address", action="share")
+    doc = GoldDoc("app350", "1", "test", "a\n\nb", [(0, 1), (3, 4)], [{LOC, share_email}, set()])
+    claims = [Claim(kind="flow", category="Location", action="collect", quote="q1", seg=0),          # right
+              Claim(kind="flow", category="Contacts", action="collect", quote="q2", seg=0),          # not labelled
+              Claim(kind="flow", category="Health and fitness", action="collect", quote="q3", seg=1)]  # APP-350 can't judge
+    rows = compare(doc, claims, "app350")
+    marks = {(r["seg"], mark, label[1]) for r in rows for mark, label, _ in r["items"]}
+    assert marks == {(0, "found", "Location"), (0, "false_alarm", "Contacts"), (0, "missed", "Personal info"),
+                     (1, "not_judged", "Health and fitness")}

@@ -53,6 +53,7 @@ class GoldDoc:
     spans: list[tuple[int, int]]  # segments
     gold: list[set[Claim]]  # true claims per segment (labels only: no quotes or offsets)
     quotes: list[str] = field(default_factory=list)  # annotated sentences (APP-350), to test the quote matcher
+    name: str = ""  # the app or website the policy belongs to
 
 
 # ---------------------------------------------------------------- label translations
@@ -216,7 +217,8 @@ def _load_app350(folder: Path) -> list[GoldDoc]:
             labels += s.get("annotations") or []
             gold.append({c for a in labels if (c := _app350_claim(a["practice"], a["modality"]))})
             quotes += [sent["sentence_text"] for sent in s.get("sentences") or [] if sent.get("annotations")]
-        docs.append(GoldDoc("app350", str(raw["policy_id"]), APP350_SPLIT[raw["policy_type"]], text, spans, gold, quotes))
+        docs.append(GoldDoc("app350", str(raw["policy_id"]), APP350_SPLIT[raw["policy_type"]], text, spans, gold, quotes,
+                            name=str(raw.get("policy_name", ""))))
     return docs
 
 
@@ -289,7 +291,8 @@ def _load_opp115(folder: Path) -> list[GoldDoc]:
                     gold[seg].update(_opp115_claims(row[5], json.loads(row[6])))
         keep = [i for i, s in enumerate(segments) if s]
         text, spans = _join([segments[i] for i in keep])
-        docs.append(GoldDoc("opp115", policy_id, opp115_split(policy_id), text, spans, [gold[i] for i in keep]))
+        docs.append(GoldDoc("opp115", policy_id, opp115_split(policy_id), text, spans, [gold[i] for i in keep],
+                            name=f.stem.split("_", 1)[1]))
     if UNMAPPED:
         print("OPP-115 annotations left out (no Play equivalent): "
               + ", ".join(f"{k} x{n}" for k, n in UNMAPPED.most_common()))
@@ -321,7 +324,7 @@ def _load_unibo(folder: Path) -> list[GoldDoc]:
                 continue
             seg = max(0, bisect_left(starts, shift(a["start"]) + 1) - 1)
             gold[seg].add(Claim(kind="flow", category=cat))
-        docs.append(GoldDoc("unibo", name, "test", text, spans, gold))
+        docs.append(GoldDoc("unibo", name, "test", text, spans, gold, name=name))
     return docs
 
 

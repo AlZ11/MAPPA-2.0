@@ -19,7 +19,7 @@ Working concept first: the actual logic, end to end, before anything production-
 
 ## Layout
 `mappa/`: vocab (shared terms + Claim row), store (SQLite + gzip blobs), play (Google Play client), collect (Part 1),
-label_reader (Part 3), text (html → text, segments, quote matching), policy_reader (Part 2), llm (local model client),
+label_reader (Part 3), text (html → text, segments, quote matching), policy_reader (Part 2), llm (Gemini client),
 datasets (gold corpora), evaluate (metrics). Run `python -m pytest -q` from the repo root.
 
 ## Explaining things to the owner

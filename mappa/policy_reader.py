@@ -3,7 +3,7 @@
 Two extractors share one interface, extract(text, spans) -> (claims, stats):
   Baseline  classical text classifiers (TF-IDF + logistic regression), trained on APP-350 and OPP-115.
             Runs anywhere in seconds; the yardstick the LLM has to beat.
-  LLM       a local open model (see llm.py), reading windows of the policy into fixed forms.
+  LLM       Gemini (see llm.py), reading windows of the policy into fixed forms.
 Every claim carries a quote copied from the policy and the character offsets where it was found.
 The evaluation (evaluate.py) calls exactly the same extract() as read_policies() below.
 """
@@ -173,11 +173,12 @@ class Baseline:
         return claims, {"seconds": time.process_time() - t0, "dropped": {}}
 
 
-# ---------------------------------------------------------------- local LLM
+# ---------------------------------------------------------------- LLM (Gemini)
 SUBTYPES = sorted({sub for subs in CATEGORIES.values() for sub in subs})
+# No "maxItems": Gemini rejects it ("invalid argument"); the output-token limit bounds the lists anyway.
 FLOW_SCHEMA = {
     "type": "object", "additionalProperties": False, "required": ["claims"],
-    "properties": {"claims": {"type": "array", "maxItems": 25, "items": {
+    "properties": {"claims": {"type": "array", "items": {
         "type": "object", "additionalProperties": False,
         "required": ["quote", "category", "subtype", "action", "negated", "recipient", "recipient_name", "purposes"],
         "properties": {
@@ -188,12 +189,12 @@ FLOW_SCHEMA = {
             "negated": {"type": "boolean"},
             "recipient": {"enum": ["none", *RECIPIENTS]},
             "recipient_name": {"type": "string"},
-            "purposes": {"type": "array", "maxItems": 7, "items": {"enum": list(PURPOSES)}},
+            "purposes": {"type": "array", "items": {"enum": list(PURPOSES)}},
         }}}},
 }
 PRACTICE_SCHEMA = {
     "type": "object", "additionalProperties": False, "required": ["claims"],
-    "properties": {"claims": {"type": "array", "maxItems": 15, "items": {
+    "properties": {"claims": {"type": "array", "items": {
         "type": "object", "additionalProperties": False, "required": ["quote", "practice", "negated", "detail"],
         "properties": {
             "quote": {"type": "string"},
@@ -268,7 +269,8 @@ PRACTICE_EXAMPLE = (
         {"quote": "The app is not intended for anyone under 16", "practice": "children", "negated": False, "detail": "16"},
     ]},
 )
-TASKS = {"flows": (FLOW_PROMPT, FLOW_SCHEMA, FLOW_EXAMPLE, 1500), "practices": (PRACTICE_PROMPT, PRACTICE_SCHEMA, PRACTICE_EXAMPLE, 600)}
+# Output budgets are generous because Gemini's thinking tokens count against them; you pay only for what is used.
+TASKS = {"flows": (FLOW_PROMPT, FLOW_SCHEMA, FLOW_EXAMPLE, 8192), "practices": (PRACTICE_PROMPT, PRACTICE_SCHEMA, PRACTICE_EXAMPLE, 4096)}
 
 
 def messages(task: str, excerpt: str) -> list[dict]:
@@ -298,9 +300,10 @@ def windows(text: str, spans: list[tuple[int, int]], max_words: int) -> list[tup
 TEXT_FIELDS = ("category", "subtype", "action", "recipient", "recipient_name", "practice", "detail")
 
 
-def verify(items: list, task: str, text: str, win_start: int, win_end: int,
-           spans: list[tuple[int, int]]) -> tuple[list[Claim], Counter]:
-    """Keep only well-formed items whose quote really is in the window. Everything dropped is counted by reason."""
+def verify(items: list, task: str, text: str, win_start: int, win_end: int, spans: list[tuple[int, int]],
+           rejected: list | None = None) -> tuple[list[Claim], Counter]:
+    """Keep only well-formed items whose quote really is in the window. Everything dropped is counted by reason;
+    quotes that are not in the policy are also appended to `rejected` as (reason, quote) for inspection."""
     kept, dropped = [], Counter()
     window = text[win_start:win_end]
     for item in items:
@@ -324,6 +327,8 @@ def verify(items: list, task: str, text: str, win_start: int, win_end: int,
         span, why = find_quote(item["quote"], window)
         if why != "ok":
             dropped[why] += 1
+            if rejected is not None:
+                rejected.append((why, item["quote"]))
             continue
         start, end = win_start + span[0], win_start + span[1]
         quote = text[start:end]  # the policy's own words, not the model's copy of them
@@ -358,11 +363,13 @@ class LLM:
         self.model = model or llm.DEFAULT_MODEL
         self.base_url = base_url or llm.DEFAULT_URL
         self.tasks, self.rep, self.window_words, self.cache_dir = tasks, rep, window_words, cache_dir
+        if "googleapis.com" in self.base_url and not llm.api_key():
+            raise SystemExit("The LLM reader uses Gemini: set GEMINI_API_KEY (create a key at https://aistudio.google.com/apikey).")
 
     def extract(self, text: str, spans: list[tuple[int, int]]) -> tuple[list[Claim], dict]:
         stats = {"seconds": 0.0, "prompt_tokens": 0, "completion_tokens": 0, "windows": 0, "failed_windows": 0,
                  "cached_windows": 0, "kept": 0, "modes": Counter(), "served_by": Counter()}
-        dropped, claims = Counter(), []
+        dropped, claims, rejected = Counter(), [], []
         for first, last in windows(text, spans, self.window_words):
             start, end = spans[first][0], spans[last][1]
             for task in self.tasks:
@@ -394,16 +401,13 @@ class LLM:
                     continue
                 if res["finish_reason"] == "length":
                     dropped["truncated_output"] += 1  # completed claims kept; the model may have had more to say
-                # A prompt far smaller than what we sent means the server cut it (Ollama's default context is small).
-                # About 4 characters per token, counted over everything sent: instructions, example and excerpt.
-                if res["usage"]["prompt_tokens"] and res["usage"]["prompt_tokens"] < 0.7 * sum(len(m["content"]) for m in msgs) / 4:
-                    dropped["input_maybe_truncated"] += 1
-                kept, why = verify(items, task, text, start, end, spans)
+                kept, why = verify(items, task, text, start, end, spans, rejected)
                 claims += kept
                 dropped.update(why)
         unique = list(dict.fromkeys(claims))  # identical claims from the same place count once
         stats["kept"] = len(unique)
         stats["dropped"] = dict(dropped)
+        stats["rejected_examples"] = rejected[:5]
         stats["modes"], stats["served_by"] = dict(stats["modes"]), dict(stats["served_by"])
         return unique, stats
 
