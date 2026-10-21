@@ -115,10 +115,28 @@ def parse_json(content: str) -> dict | None:
     except json.JSONDecodeError:
         pass
     start, end = content.find("{"), content.rfind("}")
-    if start < 0 or end <= start:
+    if start >= 0 and end > start:
+        try:
+            data = json.loads(content[start:end + 1])
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            pass
+    return _salvage_claims(content)
+
+
+def _salvage_claims(content: str) -> dict | None:
+    """A reply cut off mid-way (the model hit its length limit): keep every claim that was completed."""
+    m = re.search(r'"claims"\s*:\s*\[', content)
+    if not m:
         return None
-    try:
-        data = json.loads(content[start:end + 1])
-        return data if isinstance(data, dict) else None
-    except json.JSONDecodeError:
-        return None
+    decoder, pos, claims = json.JSONDecoder(), m.end(), []
+    while True:
+        while pos < len(content) and content[pos] in " \n\r\t,":
+            pos += 1
+        try:
+            item, pos = decoder.raw_decode(content, pos)
+        except json.JSONDecodeError:
+            break
+        claims.append(item)
+    return {"claims": claims} if claims else None

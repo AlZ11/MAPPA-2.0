@@ -120,3 +120,10 @@ def test_unreachable_server_counts_failed_windows(monkeypatch):
     monkeypatch.setattr(llm.time, "sleep", lambda s: None)
     claims, stats = LLM(model="m", base_url="http://x", tasks=("flows",)).extract(POLICY, [(0, len(POLICY))])
     assert claims == [] and stats["failed_windows"] == 1 and stats["dropped"] == {"llm_error": 1}
+
+
+def test_truncated_reply_keeps_completed_claims():
+    cut = '{"claims": [{"quote": "a", "practice": "retention", "negated": false, "detail": ""}, {"quote": "b", "prac'
+    assert llm.parse_json(cut) == {"claims": [{"quote": "a", "practice": "retention", "negated": False, "detail": ""}]}
+    assert llm.parse_json('<think>x</think>{"claims": []}') == {"claims": []}
+    assert llm.parse_json("no json here") is None

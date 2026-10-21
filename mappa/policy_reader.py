@@ -371,7 +371,7 @@ class LLM:
                     dropped["truncated_output" if res["finish_reason"] == "length" else "unparseable"] += 1
                     continue
                 if res["finish_reason"] == "length":
-                    dropped["truncated_output"] += 1  # parsed, but the model may have had more to say
+                    dropped["truncated_output"] += 1  # completed claims kept; the model may have had more to say
                 # A prompt far smaller than what we sent means the server cut it (Ollama's default context is small).
                 if res["usage"]["prompt_tokens"] and res["usage"]["prompt_tokens"] < 0.7 * (end - start) / 4:
                     dropped["input_maybe_truncated"] += 1
