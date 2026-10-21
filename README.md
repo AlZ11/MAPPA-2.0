@@ -12,6 +12,8 @@ pip install -r requirements.txt
 python -m mappa discover --run d1                 # search Play (AU) for health apps
 python -m mappa snapshot --run s1a --from d1      # freeze details, label and policy per app (resumable)
 python -m mappa status --run s1a --manifest s1a.csv
+python -m mappa labels --run s1a                  # Data Safety pages -> evidence rows
+python -m mappa show --run s1a --app com.calm.android
 python -m pytest -q
 ```
 

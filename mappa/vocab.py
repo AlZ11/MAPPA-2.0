@@ -18,7 +18,7 @@ CATEGORIES: dict[str, tuple[str, ...]] = {
     "Health and fitness": ("Health info", "Fitness info"),
     "Messages": ("Emails", "SMS or MMS", "Other in-app messages"),
     "Photos and videos": ("Photos", "Videos"),
-    "Audio files": ("Voice or sound recordings", "Music files", "Other audio files"),
+    "Audio": ("Voice or sound recordings", "Music files", "Other audio files"),  # verified on a live label
     "Files and docs": ("Files and docs",),
     "Calendar": ("Calendar events",),
     "Contacts": ("Contacts",),
