@@ -24,6 +24,19 @@ python -m mappa evaluate --corpus indomain --gold adjudicated.csv
 python -m pytest -q
 ```
 
+**Local LLM.** Any OpenAI-compatible server works; the default is Ollama on `localhost:11434`.
+Start the server with `OLLAMA_CONTEXT_LENGTH=8192` (the small default silently cuts long prompts), then
+`ollama pull qwen2.5:7b-instruct` and:
+
+```bash
+python -m mappa evaluate --extractor llm --corpus app350 --split dev --subset 10   # prompt work: dev split only
+python -m mappa evaluate --extractor llm --reps 3 --subset 30                      # test, after freezing PROMPT_VERSION
+python -m mappa read --run s1a --extractor llm --model llama3.1:8b
+```
+
+Other servers: `--base-url` (LM Studio `http://localhost:1234/v1`, vLLM, llama.cpp); hosted ones need `MAPPA_LLM_API_KEY`.
+Every model reply is cached under `data/cache/llm`, so interrupted runs resume and results can be re-scored.
+
 Later waves re-fetch the same apps: `snapshot --run s1b --from s1a`.
 All data goes to `./data` (git-ignored). Set `MAPPA_CHROMIUM` to a Chromium binary if Playwright's own
 browser download is not available.

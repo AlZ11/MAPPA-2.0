@@ -98,8 +98,7 @@ def add_extractor_args(s) -> None:
 def make_extractor(a, store: Store):
     if a.extractor == "baseline":
         return policy_reader.Baseline.load(store.root / "models" / "baseline.pkl")
-    from .llm_reader import LLM  # noqa: only needed for the LLM path
-    return LLM(model=a.model, base_url=a.base_url, cache_dir=store.root / "cache" / "llm")
+    return policy_reader.LLM(model=a.model, base_url=a.base_url, cache_dir=store.root / "cache" / "llm")
 
 
 def show(store: Store, run: str, app_id: str) -> None:
