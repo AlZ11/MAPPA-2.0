@@ -65,3 +65,17 @@ def test_canonical_sha_ignores_category_order():
 
 def test_curly_apostrophes_are_normalised():
     assert LABEL_PRACTICES[label_key("Data can’t be deleted")] == ("deletion", "deny")
+
+
+def _page(node_json: str, visible: str) -> str:
+    blob = ("<script>AF_initDataCallback({key: 'ds:3', hash: '1', data:[null,[null,null,[null,{\"138\":"
+            + node_json + "}]]], sideChannel: {}});</script>")
+    return f"<html><body>{blob}<div>{visible}</div></body></html>"
+
+
+def test_label_layout_shifts_are_errors_not_exemptions():
+    # The JSON no longer has the sections where we look, but the page visibly shows them.
+    status, claims, notes = parse_label(_page("[null,null,null,null,null]", "<h2>Data shared</h2>"))
+    assert (status, claims) == ("error", []) and "label sections" in notes[0]
+    # A genuine exempt app shows nothing of the sort.
+    assert parse_label(_page("[null,null,null,null,null]", "Google Play services"))[0] == "no_sections"

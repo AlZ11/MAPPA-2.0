@@ -8,6 +8,7 @@ Every claim carries a quote copied from the policy and the character offsets whe
 The evaluation (evaluate.py) calls exactly the same extract() as read_policies() below.
 """
 
+import hashlib
 import json
 import pickle
 import time
@@ -28,6 +29,7 @@ from .vocab import (ACTIONS, CATEGORIES, DATA_VERBS, GENERIC, HEALTH_TERMS, PRAC
                     SHARE_WORDS, Claim)
 
 PROMPT_VERSION = "p1"  # bump on any prompt change; freeze before running on a test split
+NOT_A_POLICY = {"cookie_panel", "not_a_policy"}  # collector flags meaning the page holds no policy to read
 
 
 class Extractor(Protocol):
@@ -118,7 +120,11 @@ class Baseline:
     def load(path: Path) -> "Baseline":
         if not path.exists():
             raise SystemExit(f"no trained baseline at {path}: run `python -m mappa train` first")
-        return pickle.loads(path.read_bytes())
+        data = path.read_bytes()
+        model = pickle.loads(data)
+        model.sha256 = hashlib.sha256(data).hexdigest()  # which trained file produced a read or a report
+        model.model = f"tfidf-logreg@{model.sha256[:12]}"
+        return model
 
     def extract(self, text: str, spans: list[tuple[int, int]]) -> tuple[list[Claim], dict]:
         t0 = time.process_time()
@@ -289,13 +295,20 @@ def windows(text: str, spans: list[tuple[int, int]], max_words: int) -> list[tup
     return out
 
 
+TEXT_FIELDS = ("category", "subtype", "action", "recipient", "recipient_name", "practice", "detail")
+
+
 def verify(items: list, task: str, text: str, win_start: int, win_end: int,
            spans: list[tuple[int, int]]) -> tuple[list[Claim], Counter]:
     """Keep only well-formed items whose quote really is in the window. Everything dropped is counted by reason."""
     kept, dropped = [], Counter()
     window = text[win_start:win_end]
-    for item in items if isinstance(items, list) else []:
-        if not isinstance(item, dict) or not isinstance(item.get("quote"), str):
+    for item in items:
+        # Loose JSON modes do not enforce the schema, so check types before anything else: a missing or
+        # non-boolean "negated" must never silently turn a denial into an affirmation.
+        if not isinstance(item, dict) or not isinstance(item.get("quote"), str) \
+                or not isinstance(item.get("negated"), bool) \
+                or not all(item.get(k) is None or isinstance(item.get(k), str) for k in TEXT_FIELDS):
             dropped["schema"] += 1
             continue
         if task == "flows":
@@ -325,7 +338,8 @@ def verify(items: list, task: str, text: str, win_start: int, win_end: int,
             if sub not in CATEGORIES.get(cat, ()):
                 if sub not in (None, "", "unspecified"):
                     dropped["subtype_reset"] += 1  # e.g. "Precise location" filed under Personal info
-                sub = None
+                only = CATEGORIES.get(cat, ())
+                sub = only[0] if len(only) == 1 else None  # Contacts, Device or other IDs...: one data type
             recipient = None if act == "collect" else ("unspecified" if item["recipient"] == "none" else item["recipient"])
             kept.append(Claim(kind="flow", category=cat, subtype=sub, action=act, polarity=polarity, recipient=recipient,
                               detail=detail, purposes=tuple(p for p in PURPOSES if p in purposes),
@@ -347,15 +361,16 @@ class LLM:
 
     def extract(self, text: str, spans: list[tuple[int, int]]) -> tuple[list[Claim], dict]:
         stats = {"seconds": 0.0, "prompt_tokens": 0, "completion_tokens": 0, "windows": 0, "failed_windows": 0,
-                 "kept": 0, "modes": Counter()}
+                 "cached_windows": 0, "kept": 0, "modes": Counter(), "served_by": Counter()}
         dropped, claims = Counter(), []
         for first, last in windows(text, spans, self.window_words):
             start, end = spans[first][0], spans[last][1]
             for task in self.tasks:
                 _, schema, _, max_tokens = TASKS[task]
                 stats["windows"] += 1
+                msgs = messages(task, text[start:end])
                 try:
-                    res = llm.chat_json(messages(task, text[start:end]), schema, model=self.model, base_url=self.base_url,
+                    res = llm.chat_json(msgs, schema, model=self.model, base_url=self.base_url,
                                         max_tokens=max_tokens, rep=self.rep, cache_dir=self.cache_dir)
                 except llm.LLMError as e:
                     stats["failed_windows"] += 1
@@ -366,22 +381,30 @@ class LLM:
                 stats["prompt_tokens"] += res["usage"]["prompt_tokens"]
                 stats["completion_tokens"] += res["usage"]["completion_tokens"]
                 stats["modes"][res["mode"]] += 1
+                stats["served_by"][res.get("served_by", self.model)] += 1
+                stats["cached_windows"] += res["cached"]  # replayed from data/cache: its seconds are the original run's
                 if res["data"] is None:
                     stats["failed_windows"] += 1
                     dropped["truncated_output" if res["finish_reason"] == "length" else "unparseable"] += 1
                     continue
+                items = res["data"].get("claims")
+                if not isinstance(items, list):  # valid JSON, wrong shape: not the same as "nothing to report"
+                    stats["failed_windows"] += 1
+                    dropped["schema"] += 1
+                    continue
                 if res["finish_reason"] == "length":
                     dropped["truncated_output"] += 1  # completed claims kept; the model may have had more to say
                 # A prompt far smaller than what we sent means the server cut it (Ollama's default context is small).
-                if res["usage"]["prompt_tokens"] and res["usage"]["prompt_tokens"] < 0.7 * (end - start) / 4:
+                # About 4 characters per token, counted over everything sent: instructions, example and excerpt.
+                if res["usage"]["prompt_tokens"] and res["usage"]["prompt_tokens"] < 0.7 * sum(len(m["content"]) for m in msgs) / 4:
                     dropped["input_maybe_truncated"] += 1
-                kept, why = verify(res["data"].get("claims"), task, text, start, end, spans)
+                kept, why = verify(items, task, text, start, end, spans)
                 claims += kept
                 dropped.update(why)
         unique = list(dict.fromkeys(claims))  # identical claims from the same place count once
         stats["kept"] = len(unique)
         stats["dropped"] = dict(dropped)
-        stats["modes"] = dict(stats["modes"])
+        stats["modes"], stats["served_by"] = dict(stats["modes"]), dict(stats["served_by"])
         return unique, stats
 
 
@@ -401,14 +424,29 @@ def read_policies(store: Store, run: str, extractor: Extractor, rep: int = 0) ->
     """Run an extractor over every frozen policy text of a run and store the rows."""
     counts = Counter()
     apps = [a for a in store.apps(run, GENRES) if a["text_sha"]]
+    version = PROMPT_VERSION if extractor.name == "llm" else ""
     for i, app in enumerate(apps, 1):
+        key = dict(input_sha=app["text_sha"], model=extractor.model, prompt_version=version, rep=rep)
+        flags = set((app["policy_flags"] or "").split(",")) & NOT_A_POLICY
+        if flags:  # the collector found a cookie panel or a non-policy page: no policy evidence to read
+            store.save_read(run, app["app_id"], "policy", extractor.name, [], stats={}, status="skipped:" + ",".join(flags), **key)
+            counts["skipped"] += 1
+            print(f"[{i}/{len(apps)}] {app['app_id']}: skipped ({', '.join(flags)})", flush=True)
+            continue
         text = store.get_blob(app["text_sha"]).decode()
         spans = segment(text)
         claims, stats = extractor.extract(text, spans)
-        status = "partial" if stats.get("failed_windows") else "ok"
-        store.save_read(run, app["app_id"], "policy", extractor.name, segment_of(claims, spans),
-                        input_sha=app["text_sha"], stats=stats, model=extractor.model,
-                        prompt_version=PROMPT_VERSION if extractor.name == "llm" else "", rep=rep, status=status)
+        windows_, failed = stats.get("windows", 0), stats.get("failed_windows", 0)
+        status = "failed" if windows_ and failed == windows_ else "partial" if failed else "ok"
+        earlier = store.db.execute("SELECT status FROM reads WHERE run = ? AND app_id = ? AND source = 'policy' AND "
+                                   "extractor = ? AND model = ? AND prompt_version = ? AND rep = ?",
+                                   (run, app["app_id"], extractor.name, extractor.model, version, rep)).fetchone()
+        if status == "failed" and earlier:  # e.g. the model server is down: keep the earlier read
+            counts["failed"] += 1
+            print(f"[{i}/{len(apps)}] {app['app_id']}: FAILED ({stats.get('errors', ['?'])[0]}); earlier read kept", flush=True)
+            continue
+        store.save_read(run, app["app_id"], "policy", extractor.name, segment_of(claims, spans), stats=stats,
+                        status=status, **key)
         counts[status] += 1
         dropped = sum(stats.get("dropped", {}).values())
         print(f"[{i}/{len(apps)}] {app['app_id']}: {len(claims)} claims"

@@ -112,14 +112,20 @@ RULES: dict[str, re.Pattern] = {
 # No public corpus has enough health-data labels to train on (OPP-115's are almost all in one hospital
 # policy, which sits in its test split), so the baseline finds health data flows with keywords.
 HEALTH_TERMS = re.compile(
-    r"health|medical|fitness|symptom|diagnos|medication|prescription|heart rate|blood pressure|glucose"
-    r"|blood sugar|\bweight\b|\bBMI\b|step count|sleep|menstrua|pregnan|fertility|ovulation|\bmood\b"
-    r"|mental|calorie|nutrition|exercise|workout|biometric",
+    r"\bhealth|\bmedical|\bfitness|\bsymptom|\bdiagnos(?:is|es|ed|e|ing)\b|\bmedication|\bprescription|heart rate"
+    r"|blood pressure|\bglucose|blood sugar|\bweight\b|\bBMI\b|step count|\bsleep|\bmenstrua|\bpregnan|\bfertility"
+    r"|\bovulation|\bmood\b|\bmental\b|\bcalorie|\bnutrition|\bworkout|\bbiometric"
+    r"|\bexercis(?:e|es|ing)\b(?!\s+(?:of\s+)?(?:your|their|his|her|my|our|any|these|those|such|this|the|a|certain)\b)",
     re.I,
 )
-DATA_VERBS = re.compile(r"\b(?:collect|gather|obtain|receiv|record|stor|track|process|use|uses|share|disclos|transfer"
-                        r"|sell|provid|access)", re.I)
-SHARE_WORDS = re.compile(r"\b(?:share|disclos|transfer|sell|third[- ]part|partners?\b)", re.I)
+DATA_VERBS = re.compile(
+    r"\b(?:collect(?:s|ed|ing)?|gather(?:s|ed|ing)?|obtain(?:s|ed|ing)?|receiv(?:e|es|ed|ing)|record(?:s|ed|ing)?"
+    r"|stor(?:e|es|ed|ing|age)|track(?:s|ed|ing)?|process(?:es|ed|ing)?|use[sd]?|using|shar(?:e|es|ed|ing)"
+    r"|disclos(?:e|es|ed|ing|ure)|transfer(?:s|red|ring)?|sell(?:s|ing)?|sold|provid(?:e|es|ed|ing)|access(?:es|ed|ing)?)\b",
+    re.I,
+)
+SHARE_WORDS = re.compile(r"\b(?:shar(?:e|es|ed|ing)|disclos(?:e|es|ed|ing|ure)|transfer(?:s|red|ring)?|sell(?:s|ing)?|sold"
+                         r"|third[- ]part(?:y|ies)|partners?)\b", re.I)
 
 
 @dataclass(frozen=True)

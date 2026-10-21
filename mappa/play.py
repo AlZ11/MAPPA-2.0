@@ -12,6 +12,7 @@ import random
 import re
 import time
 from datetime import datetime, timezone
+from html import unescape
 from typing import Any, Callable, NamedTuple
 from urllib.parse import quote, urlsplit
 
@@ -179,6 +180,6 @@ def parse_details(html: str) -> dict:
         except json.JSONDecodeError:
             pass
     if not out["policy_url"]:
-        m = re.search(r'aria-label="Privacy Policy (\S+) will open', html)
-        out["policy_url"] = m.group(1) if m else None
+        m = re.search(r'aria-label="Privacy Policy (.+?) will open', html)
+        out["policy_url"] = unescape(m.group(1)) if m else None
     return out

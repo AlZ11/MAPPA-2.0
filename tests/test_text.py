@@ -67,3 +67,23 @@ def test_find_quote_normalises_but_never_fuzzes():
     assert find_quote("We do not sell ... to anyone", text) == (None, "elided")
     assert find_quote("sell your", text) == (None, "too_short")
     assert find_quote("Name", text)[1] == "ok"  # short, but a whole line (a list item)
+
+
+def test_broken_html_never_swallows_the_policy():
+    policy = "<p>" + "We collect your email address to run your account. " * 30 + "</p>"
+    unclosed_header = f"<html><body><header><div>Menu</header><main>{policy}</main></body></html>"
+    form_wrapper = f"<html><body><form id='aspnetForm'><main>{policy}</main></form></body></html>"
+    for page in (unclosed_header, form_wrapper):
+        assert len(html_to_text(page).split()) == 270  # every word of the policy survives
+    cookie_section = f"<main><h2 id='cookies'>Cookies</h2><section id='cookies-we-use'>We use Meta Pixel.</section>{policy}</main>"
+    assert "Meta Pixel" in html_to_text(cookie_section) and "Cookies" in html_to_text(cookie_section)
+
+
+def test_dates_sentences_and_repeated_short_quotes():
+    assert policy_date("Last Updated: September 2026") == "September 2026"
+    assert policy_date("Last updated: 21.05.2026") == "21.05.2026"
+    text = "You can delete your account on request. We never share your health data."
+    assert len(sentences(text)) == 2  # "request." is not the abbreviation "st."
+    listed = "We collect your email address and name.\nWe collect:\nEmail address\nName"
+    span, why = find_quote("Email address", listed)
+    assert why == "ok" and listed[span[0]:span[1]] == "Email address" and span[0] > 40  # the list item, not the sentence

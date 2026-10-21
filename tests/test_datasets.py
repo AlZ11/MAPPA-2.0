@@ -47,3 +47,9 @@ def test_parse_codes():
         Claim(kind="practice", practice="deletion"),
         Claim(kind="practice", practice="automated_decisions", polarity="deny"),
     }
+
+
+def test_opp115_values_match_regardless_of_case():
+    attrs = {"Personal Information Type": {"value": "User Profile"}, "Purpose": {"value": "Service Operation and Security"}}
+    (claim,) = _opp115_claims("Third Party Sharing/Collection", attrs)
+    assert claim.category == "Personal info" and claim.purposes == ("Fraud prevention, security, and compliance",)

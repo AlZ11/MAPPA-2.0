@@ -35,8 +35,13 @@ def parse_label(html: str) -> tuple[str, list[Claim], list[str]]:
         return "error", [], ["no label data in the page"]
     node = play.jget(blob, 1, 2, LABEL_FIELD)
     sections = play.jget(node, 4)
+    visible = _visible_text(html)
     if not sections:
-        return "no_sections", [], []  # e.g. Google Play services: exempt system apps have no label
+        # Exempt system apps (e.g. Google Play services) truly have no sections. If the page shows label
+        # sections anyway, the JSON layout moved: that is a parser failure, not an exempt app.
+        if re.search(r'id="[sc]Label\d+"', html) or any(t in visible for t in (*SECTION_TITLES, *EMPTY_TITLES)):
+            return "error", [], ["the page shows label sections but none were found in the JSON"]
+        return "no_sections", [], []
 
     claims, notes = [], []
     try:
@@ -61,8 +66,10 @@ def parse_label(html: str) -> tuple[str, list[Claim], list[str]]:
             claims.append(Claim(kind="practice", practice=name, polarity=polarity, quote=f"Security practices › {text}"))
     except (TypeError, IndexError, AttributeError) as e:  # the JSON layout moved: fail loudly, write nothing
         return "error", [], [f"unexpected label layout: {type(e).__name__}: {e}"]
+    if "security practices" in visible and not any(c.kind == "practice" for c in claims):
+        return "error", [], ["the page shows security practices but none were found in the JSON"]
 
-    problems = cross_check(html, claims)
+    problems = cross_check(html, claims, visible)
     if problems:
         return "error", [], problems
     return "ok", claims, notes
@@ -79,15 +86,23 @@ def _section_claims(title: str, action: str, categories: list, notes: list[str])
             if subtype not in CATEGORIES.get(name, ()):
                 notes.append(f"unknown data type {name!r} > {subtype!r}")
             purposes, leftover = split_purposes(purposes_text or "")
-            if leftover:
+            if leftover:  # kept in the row (so label changes stay visible) and reported
                 notes.append(f"unknown purpose {leftover!r}")
+                purposes += (leftover,)
             claims.append(Claim(kind="flow", category=name, subtype=subtype, action=action, polarity="affirm",
                                 recipient="third_party" if action == "share" else None, purposes=purposes,
                                 optional=bool(optional), quote=f"{title} › {name} › {subtype}"))
     return claims
 
 
-def cross_check(html: str, claims: list[Claim]) -> list[str]:
+def _visible_text(html: str) -> str:
+    soup = BeautifulSoup(html, "lxml")
+    for tag in soup(["script", "style"]):
+        tag.decompose()
+    return label_key(soup.get_text(" "))
+
+
+def cross_check(html: str, claims: list[Claim], visible: str | None = None) -> list[str]:
     """Check the JSON against what the page visibly shows. A mismatch means the parser is wrong."""
     problems = []
     for action, prefix in (("share", "sLabel"), ("collect", "cLabel")):
@@ -95,10 +110,7 @@ def cross_check(html: str, claims: list[Claim]) -> list[str]:
         categories = len({c.category for c in claims if c.action == action and c.polarity == "affirm"})
         if regions != categories:
             problems.append(f"{action}: page shows {regions} categories, JSON has {categories}")
-    soup = BeautifulSoup(html, "lxml")
-    for tag in soup(["script", "style"]):
-        tag.decompose()
-    visible = label_key(soup.get_text(" "))
+    visible = visible if visible is not None else _visible_text(html)
     for c in claims:
         for text in (c.quote or "").split(" › "):
             if text != "Security practices" and label_key(text) not in visible:

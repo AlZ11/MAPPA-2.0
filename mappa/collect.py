@@ -61,10 +61,7 @@ def discover(store: Store, run: str, queries=QUERIES) -> int:
     pages = [(f"search:{q}", play.search_url(q)) for q in queries]
     pages += [(f"category:{c}", play.category_url(c)) for c in CATEGORY_PAGES]
     for i, (kind, url) in enumerate(pages, 1):
-        if store.pending(run, "*", kind):
-            f = play.get(url)
-            store.record_fetch(run, "*", kind, url=url, final_url=f.final_url, status=f.status,
-                               content_type=f.content_type, body=f.body, note=f.note)
+        _fetch(store, run, "*", kind, url)
         html = (store.body(run, "*", kind) or b"").decode("utf-8", "replace")
         for rank, app_id in enumerate(play.app_ids(html), 1):
             store.add_app(run, app_id, kind, rank)
@@ -78,8 +75,10 @@ def snapshot(store: Store, run: str, source_run: str, *, limit: int | None = Non
     source_kind = store.run_kind(source_run)
     if source_kind is None:
         raise SystemExit(f"unknown run {source_run!r}")
-    # From a discovery run: all candidates. From a snapshot run: its in-genre apps (the panel).
-    rows = store.apps(source_run, None if source_kind == "discover" else GENRES)
+    # From a discovery run: all candidates. From a snapshot run: its in-genre apps (the panel), plus any
+    # whose details failed there (genre unknown), so no app silently leaves the panel.
+    panel = source_kind == "snapshot"
+    rows = [r for r in store.apps(source_run) if not panel or r["genre"] in GENRES or r["genre"] is None]
     store.start_run(run, "snapshot", {"from": source_run, "limit": limit, "render": render, "apps": only})
     if only:  # named apps first, even if discovery never found them
         known = {r["app_id"]: r for r in rows}
@@ -93,7 +92,7 @@ def snapshot(store: Store, run: str, source_run: str, *, limit: int | None = Non
     apps = [a for a in store.apps(run) if not only or a["app_id"] in only][:limit]
     for i, app in enumerate(apps, 1):
         app_id = app["app_id"]
-        line = snapshot_app(store, run, app_id, render)
+        line = snapshot_app(store, run, app_id, render, panel)
         print(f"[{i}/{len(apps)}] {app_id}: {line}", flush=True)
 
 
@@ -107,14 +106,14 @@ def _fetch(store: Store, run: str, app_id: str, kind: str, url: str, tries: int 
         return
     for _ in range(tries):
         f = play.get(url)
-        if f.status != 200 or kind not in ("details", "label") or _has_play_data(f.body):
+        if f.status != 200 or kind in ("policy", "policy_rendered") or _has_play_data(f.body):
             break
         f = f._replace(status=0, note="HTTP 200 but no app data in the page")
     store.record_fetch(run, app_id, kind, url=url, final_url=f.final_url, status=f.status,
                        content_type=f.content_type, body=f.body, note=f.note)
 
 
-def snapshot_app(store: Store, run: str, app_id: str, render: bool) -> str:
+def snapshot_app(store: Store, run: str, app_id: str, render: bool, panel: bool = False) -> str:
     _fetch(store, run, app_id, "details", play.details_url(app_id))
     det = store.fetch(run, app_id, "details")
     if det["status"] == 404:
@@ -125,23 +124,26 @@ def snapshot_app(store: Store, run: str, app_id: str, render: bool) -> str:
         return f"details failed ({det['status']}, {det['note']})"
     meta = play.parse_details(html.decode("utf-8", "replace"))
     store.update_app(run, app_id, **meta)
+    note = ""
     if meta["genre"] not in GENRES:
-        return f"skipped (genre {meta['genre']})"
+        if not panel:
+            return f"skipped (genre {meta['genre']})"
+        note = f"; category is now {meta['genre']} (kept: panel)"
 
     _fetch(store, run, app_id, "label", play.datasafety_url(app_id))
     if not meta["policy_url"]:
         store.update_app(run, app_id, policy_flags="no_policy_url")
-        return "label fetched; NO privacy policy link"
+        return f"label fetched; NO privacy policy link{note}"
     fetch_policy(store, run, app_id, meta["policy_url"], render)
     app = store.db.execute("SELECT policy_flags FROM apps WHERE run = ? AND app_id = ?", (run, app_id)).fetchone()
-    return f"label + policy fetched ({app['policy_flags'] or 'ok'})"
+    return f"label + policy fetched ({app['policy_flags'] or 'ok'}){note}"
 
 
 def fetch_policy(store: Store, run: str, app_id: str, url: str, render: bool) -> None:
     """Plain download first. If that yields almost no text (a page built by JavaScript), render it."""
     _fetch(store, run, app_id, "policy", url)
     text = policy_text(store, run, app_id)
-    if render and len(text.split()) < MIN_POLICY_WORDS and _is_html(store.fetch(run, app_id, "policy")):
+    if render and len(text.split()) < MIN_POLICY_WORDS and _readable(store.fetch(run, app_id, "policy")) == "html":
         if store.pending(run, app_id, "policy_rendered"):
             try:
                 final_url, html = render_page(url)
@@ -161,8 +163,12 @@ def policy_text(store: Store, run: str, app_id: str) -> str:
     best = ""
     for kind in ("policy", "policy_rendered"):
         body = store.body(run, app_id, kind)
-        if body and _is_html(store.fetch(run, app_id, kind)):
-            text = html_to_text(body)
+        how = _readable(store.fetch(run, app_id, kind))
+        if body and how:
+            if how == "html":
+                text = html_to_text(body)
+            else:
+                text = "\n".join(" ".join(ln.split()) for ln in body.decode("utf-8", "replace").splitlines() if ln.strip())
             if len(text) > len(best):
                 best = text
     return best
@@ -183,8 +189,14 @@ def render_page(url: str) -> tuple[str, bytes]:
             browser.close()
 
 
-def _is_html(fetch) -> bool:
-    return fetch is not None and fetch["status"] == 200 and "html" in (fetch["content_type"] or "html")
+def _readable(fetch) -> str | None:
+    """'html', 'text' (plain text, e.g. a PRIVACY.md), or None when we cannot read this content type."""
+    if fetch is None or fetch["status"] != 200:
+        return None
+    content_type = (fetch["content_type"] or "").lower()
+    if "html" in content_type or not content_type:
+        return "html"
+    return "text" if content_type.startswith("text/") else None
 
 
 def policy_flags(fetch, text: str) -> list[str]:
@@ -195,9 +207,11 @@ def policy_flags(fetch, text: str) -> list[str]:
     url = (fetch["final_url"] or "").lower()
     if "pdf" in (fetch["content_type"] or "") or url.endswith(".pdf"):
         flags.append("pdf")
+    elif _readable(fetch) is None:
+        flags.append(f"unsupported_type:{fetch['content_type']}")
     if urlsplit(url).hostname in ("docs.google.com", "drive.google.com", "sites.google.com"):
         flags.append("google_doc")
-    if text and len(POLICY_WORDS.findall(text)) < 3:
+    if text and "privacy" not in text.lower() and len(POLICY_WORDS.findall(text)) < 3:
         flags.append("not_a_policy")  # e.g. a store page or a language picker
     lines = text.split("\n")
     if text and len(text.split()) < 1500 and sum("cookie" in ln.lower() for ln in lines) >= 0.3 * len(lines):
@@ -224,7 +238,7 @@ def status(store: Store, run: str, manifest: str | None = None) -> None:
             if f:
                 flags[f] = flags.get(f, 0) + 1
     labels: dict[str, int] = {}
-    for a in in_genre:
+    for a in [a for a in apps if a["genre"] in GENRES or a["label_status"]]:
         labels[a["label_status"] or "not read"] = labels.get(a["label_status"] or "not read", 0) + 1
     print(f"  policy flags: {flags or 'none'}")
     print(f"  label status: {labels}")

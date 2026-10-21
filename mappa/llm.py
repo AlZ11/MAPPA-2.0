@@ -32,13 +32,15 @@ class LLMError(RuntimeError):
 
 
 def chat_json(messages: list[dict], schema: dict, *, model: str, base_url: str, seed: int = 0,
-              max_tokens: int = 1500, rep: int = 0, cache_dir: Path | None = None, timeout: int = 300) -> dict:
-    """Ask for a JSON reply. Returns {data, usage, seconds, mode, finish_reason, cached}; data is None if unparseable.
+              max_tokens: int = 1500, rep: int = 0, cache_dir: Path | None = None, timeout: int = 600) -> dict:
+    """Ask for a JSON reply. Returns {data, usage, seconds, mode, finish_reason, served_by, cached};
+    data is None if the reply could not be parsed. Any failure to get a reply raises LLMError.
 
     rep is part of the cache key, so repeated runs (to measure stability) really are re-run.
     """
     base = {"model": model, "messages": messages, "temperature": 0, "seed": seed, "max_tokens": max_tokens}
-    key = hashlib.sha256(json.dumps({"request": base, "schema": schema, "rep": rep}, sort_keys=True).encode()).hexdigest()
+    key = hashlib.sha256(json.dumps({"request": base, "schema": schema, "rep": rep, "server": base_url},
+                                    sort_keys=True).encode()).hexdigest()
     path = Path(cache_dir) / key[:2] / f"{key}.json" if cache_dir else None
     if path and path.exists():
         return {**json.loads(path.read_text()), "cached": True}
@@ -54,24 +56,27 @@ def chat_json(messages: list[dict], schema: dict, *, model: str, base_url: str, 
             body["messages"] = _with_schema(messages, schema)
             if mode == "json_object":
                 body["response_format"] = {"type": "json_object"}
-        t0 = time.monotonic()
-        r = _post(f"{base_url.rstrip('/')}/chat/completions", body, timeout)
-        seconds = time.monotonic() - t0
+        r, seconds = _post(f"{base_url.rstrip('/')}/chat/completions", body, timeout)
         if r.status_code in (400, 422) or (r.status_code >= 500 and "response_format" in r.text):
             continue  # this server does not support this way of asking for JSON (llama.cpp answers 500)
         if r.status_code != 200:
             raise LLMError(f"HTTP {r.status_code}: {r.text[:300]}")
-        reply = r.json()
-        choice = reply["choices"][0]
-        data = parse_json(choice["message"].get("content") or "")
-        finish = choice.get("finish_reason")
+        try:
+            reply = r.json()
+            choice = reply["choices"][0]
+            content = choice["message"].get("content") or ""
+            finish = choice.get("finish_reason")
+            usage = reply.get("usage") or {}
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
+            raise LLMError(f"unexpected reply: {r.text[:300]}") from e
+        data = parse_json(content)
         if data is None and mode != "prompt" and finish != "length":
             continue  # the server ignored the JSON request: try a looser mode
         _working_mode[(base_url, model)] = MODES.index(mode)
-        usage = reply.get("usage") or {}
-        result = {"data": data, "usage": {"prompt_tokens": usage.get("prompt_tokens", 0),
-                                          "completion_tokens": usage.get("completion_tokens", 0)},
-                  "seconds": seconds, "mode": mode, "finish_reason": finish, "cached": False}
+        result = {"data": data, "usage": {"prompt_tokens": usage.get("prompt_tokens") or 0,
+                                          "completion_tokens": usage.get("completion_tokens") or 0},
+                  "seconds": seconds, "mode": mode, "finish_reason": finish,
+                  "served_by": reply.get("model") or model, "cached": False}
         if path and data is not None:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(result))
@@ -79,24 +84,34 @@ def chat_json(messages: list[dict], schema: dict, *, model: str, base_url: str, 
     raise LLMError("the server rejected every way of asking for JSON")
 
 
-def _post(url: str, body: dict, timeout: int) -> requests.Response:
-    """POST with retries: network errors and server errors twice, rate limits (hosted endpoints) up to 5 times."""
+def _post(url: str, body: dict, timeout: int) -> tuple[requests.Response, float]:
+    """POST with retries: connection errors and server errors twice, rate limits (hosted endpoints) up to 5 times.
+    A timeout is not retried: a single-stream local server would just redo the same long generation.
+    Returns the response and the seconds the successful attempt took."""
     headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY else {}
     for attempt in range(6):
+        t0 = time.monotonic()
         try:
             r = requests.post(url, json=body, headers=headers, timeout=timeout)
+        except requests.Timeout as e:
+            raise LLMError(f"no reply from {url} within {timeout}s") from e
         except requests.RequestException as e:
             if attempt >= 2:
                 raise LLMError(f"cannot reach {url}: {e}") from e
             time.sleep(2 ** attempt)
             continue
+        seconds = time.monotonic() - t0
         if r.status_code == 429 and attempt < 5:
-            time.sleep(min(float(r.headers.get("retry-after") or 2 ** attempt), 120))
+            try:
+                wait = float(r.headers.get("retry-after") or 2 ** attempt)
+            except ValueError:  # an HTTP date instead of seconds
+                wait = 2 ** attempt
+            time.sleep(min(wait, 120))
             continue
         if r.status_code >= 500 and attempt < 2 and "response_format" not in r.text:
             time.sleep(2 ** attempt)
             continue
-        return r
+        return r, seconds
     raise LLMError(f"gave up on {url}")
 
 
@@ -111,18 +126,21 @@ def parse_json(content: str) -> dict | None:
     content = re.sub(r"<think>.*?</think>", "", content, flags=re.S).strip()
     try:
         data = json.loads(content)
-        return data if isinstance(data, dict) else None
+        if isinstance(data, dict):
+            return data
     except json.JSONDecodeError:
         pass
-    start, end = content.find("{"), content.rfind("}")
-    if start >= 0 and end > start:
+    decoder = json.JSONDecoder()
+    for n, m in enumerate(re.finditer(r"\{", content)):  # the first complete object, wherever it starts
         try:
-            data = json.loads(content[start:end + 1])
-            if isinstance(data, dict):
-                return data
+            data, _ = decoder.raw_decode(content, m.start())
         except json.JSONDecodeError:
-            pass
-    return _salvage_claims(content)
+            if n == 0 and (salvaged := _salvage_claims(content)):
+                return salvaged  # the reply itself was cut off: keep what was completed
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
 
 
 def _salvage_claims(content: str) -> dict | None:

@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .datasets import SCOPE, GoldDoc, load, parse_codes
-from .policy_reader import segment_of
+from .policy_reader import PROMPT_VERSION, segment_of
 from .store import Store, git_commit
 from .text import find_quote, segment
 from .vocab import CATEGORIES, GENERIC, PRACTICES, Claim
@@ -166,11 +166,16 @@ def run_eval(extractor, corpora: list[str], root: Path, *, split: str = "test", 
              subset: int | None = None, gold_path: Path | None = None) -> dict:
     report = {
         "extractor": extractor.name, "model": extractor.model, "split": split, "reps": reps, "subset": subset,
+        "prompt_version": PROMPT_VERSION if extractor.name == "llm" else None,
+        "model_sha256": getattr(extractor, "sha256", None),  # the exact trained baseline file
         "git_commit": git_commit(), "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "machine": f"{platform.platform()} | {platform.processor() or platform.machine()} | python {platform.python_version()}",
         "corpora": {},
     }
     for corpus in corpora:
+        if corpus in ("unibo", "indomain") and split != "test":
+            print(f"skipping {corpus}: it is test data only, so it is never used for {split} (prompt) work")
+            continue
         docs = load(corpus, root, None if corpus in ("unibo", "indomain") else split, gold_path)[:subset]
         runs, stats = [], []
         for rep in range(reps if extractor.name != "baseline" else 1):  # the baseline is deterministic
@@ -213,6 +218,7 @@ def cost(stats: list[dict]) -> dict:
         "dropped": dict(dropped),
         "windows": sum(s.get("windows", 0) for s in stats),
         "failed_windows": sum(s.get("failed_windows", 0) for s in stats),
+        "cached_windows": sum(s.get("cached_windows", 0) for s in stats),
     }
 
 
@@ -221,13 +227,17 @@ def _fmt(x, digits=2):
 
 
 def print_report(report: dict) -> None:
-    print(f"\n== {report['extractor']} ({report['model']}), {report['split']} split, commit {report['git_commit']} ==")
+    version = f", prompt {report['prompt_version']}" if report["prompt_version"] else ""
+    print(f"\n== {report['extractor']} ({report['model']}{version}), {report['split']} split, commit {report['git_commit']} ==")
     for corpus, res in report["corpora"].items():
         print(f"\n## {corpus}: {res['docs']} documents")
         for proj, levels in res["scores"].items():
             for level, s in levels.items():
+                if not any(row["tp"] + row["fp"] + row["fn"] for row in s["labels"]):
+                    print(f"{proj:8} {level}  (nothing to score: no gold and no predictions)")
+                    continue
                 if not any(row["tp"] + row["fp"] for row in s["labels"]):
-                    print(f"{proj:8} {level}  (this extractor produces no {proj} labels)")
+                    print(f"{proj:8} {level}  NO PREDICTIONS: recall 0 on {sum(r['fn'] for r in s['labels'])} gold labels")
                     continue
                 m = s["micro"]
                 ci = f"[{_fmt(m['ci95'][0])}, {_fmt(m['ci95'][1])}]" if m["ci95"] else ""
@@ -241,7 +251,8 @@ def print_report(report: dict) -> None:
                               f"  (tp {row['tp']}, fp {row['fp']}, fn {row['fn']}; ref {_fmt(row['reference_f1'])})")
         c = res["cost"]
         print(f"cost: {_fmt(c['seconds_per_doc_median'], 1)} s/doc (median), {_fmt(c['tokens_per_doc_mean'], 0)} tokens/doc;"
-              f" quote failures {_fmt(c['quote_failure_rate'])}; failed windows {c['failed_windows']}/{c['windows']};"
+              f" quote failures {_fmt(c['quote_failure_rate'])}; failed windows {c['failed_windows']}/{c['windows']}"
+              f" ({c['cached_windows']} replayed from cache, timed at their original run);"
               f" dropped {c['dropped'] or 'none'}")
         if "stability" in res:
             st = res["stability"]

@@ -127,3 +127,14 @@ def test_truncated_reply_keeps_completed_claims():
     assert llm.parse_json(cut) == {"claims": [{"quote": "a", "practice": "retention", "negated": False, "detail": ""}]}
     assert llm.parse_json('<think>x</think>{"claims": []}') == {"claims": []}
     assert llm.parse_json("no json here") is None
+
+
+def test_loose_json_with_wrong_types_or_shape_is_counted_not_trusted(server):
+    no_negated = {k: v for k, v in FLOW.items() if k != "negated"}
+    numeric_name = {**FLOW, "recipient_name": 5}
+    server.replies = lambda task, body: reply([no_negated, numeric_name])
+    claims, stats = LLM(model="m", base_url="http://x", tasks=("flows",)).extract(POLICY, [(0, len(POLICY))])
+    assert claims == [] and stats["dropped"] == {"schema": 2}  # a missing "negated" never becomes "affirm"
+    server.replies = lambda task, body: FakeResponse(200, content=json.dumps({"flows": [FLOW]}))
+    claims, stats = LLM(model="m", base_url="http://x", tasks=("flows",)).extract(POLICY, [(0, len(POLICY))])
+    assert claims == [] and stats["failed_windows"] == 1  # wrong shape is a failed window, not "nothing found"

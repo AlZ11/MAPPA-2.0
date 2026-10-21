@@ -47,3 +47,9 @@ def test_stability_and_bootstrap():
     per_doc = [(3, 1, 0), (2, 0, 2), (5, 1, 1)]
     lo, hi = bootstrap(per_doc)
     assert 0 <= lo <= hi <= 1 and bootstrap(per_doc) == (lo, hi)  # deterministic
+
+
+def test_opp115_cannot_judge_practice_polarity():
+    doc = GoldDoc("opp115", "1", "test", "a", [(0, 1)], [{Claim(kind="practice", practice="retention")}])
+    denied = Claim(kind="practice", practice="retention", polarity="deny", seg=0)
+    assert score([doc], [[denied]], "opp115")["practice"]["L1"]["micro"]["f1"] == 1.0

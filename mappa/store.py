@@ -21,6 +21,9 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
     run TEXT PRIMARY KEY, kind TEXT, started_at TEXT, git_commit TEXT, params TEXT
 );
+CREATE TABLE IF NOT EXISTS run_log (
+    run TEXT, started_at TEXT, git_commit TEXT, params TEXT
+);
 CREATE TABLE IF NOT EXISTS fetches (
     run TEXT, app_id TEXT, kind TEXT, url TEXT, final_url TEXT, status INTEGER,
     content_type TEXT, sha256 TEXT, bytes INTEGER, fetched_at TEXT, attempts INTEGER, note TEXT,
@@ -57,7 +60,7 @@ def now() -> str:
 
 def git_commit() -> str:
     try:
-        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
+        out = subprocess.run(["git", "describe", "--always", "--dirty"], capture_output=True, text=True,
                              cwd=Path(__file__).parent, timeout=5)
         return out.stdout.strip()
     except (OSError, subprocess.SubprocessError):
@@ -91,8 +94,10 @@ class Store:
 
     # ------------------------------------------------------------------ runs and fetches
     def start_run(self, run: str, kind: str, params: dict) -> None:
-        self.db.execute("INSERT OR IGNORE INTO runs VALUES (?, ?, ?, ?, ?)",
-                        (run, kind, now(), git_commit(), json.dumps(params, sort_keys=True)))
+        """Register a run (first call) and log every invocation, since a run is often resumed with other code."""
+        row = (run, now(), git_commit(), json.dumps(params, sort_keys=True))
+        self.db.execute("INSERT OR IGNORE INTO runs VALUES (?, ?, ?, ?, ?)", (run, kind, *row[1:]))
+        self.db.execute("INSERT INTO run_log VALUES (?, ?, ?, ?)", row)
         self.db.commit()
 
     def run_kind(self, run: str) -> str | None:

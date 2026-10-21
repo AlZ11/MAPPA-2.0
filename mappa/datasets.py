@@ -21,6 +21,7 @@ import json
 import re
 import zipfile
 from bisect import bisect_left
+from collections import Counter
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -124,10 +125,17 @@ def _scope_app350(c: Claim) -> Claim | None:
     return c if c.subtype in APP350_SUBTYPES or c.subtype is None else replace(c, subtype=None)
 
 
+OPP115_PURPOSE_SET = set(OPP115_PURPOSES.values())
+
+
 def _scope_opp115(c: Claim) -> Claim | None:
+    # OPP-115 never marks a practice as denied, so it cannot judge practice polarity; it has no subtypes, and
+    # only five of Play's purposes. Purposes are scored only for data types OPP-115 can map (see UNMAPPED).
     if c.kind == "practice":
-        return c if c.practice in OPP115_PRACTICES else None
-    return replace(c, subtype=None) if c.category in OPP115_CATEGORIES else None
+        return replace(c, polarity="affirm") if c.practice in OPP115_PRACTICES else None
+    if c.category not in OPP115_CATEGORIES:
+        return None
+    return replace(c, subtype=None, purposes=tuple(p for p in c.purposes if p in OPP115_PURPOSE_SET))
 
 
 def _scope_unibo(c: Claim) -> Claim | None:
@@ -221,13 +229,21 @@ def opp115_split(policy_id: str) -> str:
 _OPP115_ORDER: dict[str, str] = {}
 
 
+# OPP-115 spells some values differently in different files ("User profile" / "User Profile"): match without case.
+_OPP115_TYPES_CF = {k.casefold(): v for k, v in OPP115_TYPES.items()}
+_OPP115_PURPOSES_CF = {k.casefold(): v for k, v in OPP115_PURPOSES.items()}
+UNMAPPED: Counter = Counter()  # OPP-115 values left out of scoring, reported when the corpus loads
+
+
 def _opp115_claims(category: str, attrs: dict) -> list[Claim]:
     value = lambda name: (attrs.get(name) or {}).get("value")
     if category in ("First Party Collection/Use", "Third Party Sharing/Collection"):
-        cat = OPP115_TYPES.get(value("Personal Information Type"))
+        data_type = value("Personal Information Type") or ""
+        cat = _OPP115_TYPES_CF.get(data_type.casefold())
         if cat is None:
+            UNMAPPED[f"data type {data_type!r}"] += 1
             return []
-        purpose = OPP115_PURPOSES.get(value("Purpose"))
+        purpose = _OPP115_PURPOSES_CF.get((value("Purpose") or "").casefold())
         return [Claim(kind="flow", category=cat,
                       action="collect" if category.startswith("First") else "share",
                       polarity="deny" if value("Does/Does Not") == "Does Not" else "affirm",
@@ -274,6 +290,10 @@ def _load_opp115(folder: Path) -> list[GoldDoc]:
         keep = [i for i, s in enumerate(segments) if s]
         text, spans = _join([segments[i] for i in keep])
         docs.append(GoldDoc("opp115", policy_id, opp115_split(policy_id), text, spans, [gold[i] for i in keep]))
+    if UNMAPPED:
+        print("OPP-115 annotations left out (no Play equivalent): "
+              + ", ".join(f"{k} x{n}" for k, n in UNMAPPED.most_common()))
+        UNMAPPED.clear()
     return docs
 
 
