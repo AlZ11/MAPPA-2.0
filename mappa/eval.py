@@ -171,4 +171,7 @@ if __name__ == "__main__":
     is_oracle = bool(args) and args[0] == "oracle"
     if is_oracle:
         args = args[1:]
-    run(int(args[0]) if args else 10, oracle=is_oracle)
+    try:
+        run(int(args[0]) if args else 10, oracle=is_oracle)
+    except RuntimeError as e:  # Groq's daily cap: replies so far are saved, rerun later to continue
+        sys.exit(f"Stopped: {e}\nEvery reply so far is saved; run the same command later to carry on.")
