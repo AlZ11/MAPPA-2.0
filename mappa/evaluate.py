@@ -302,8 +302,17 @@ def _label_text(label: tuple) -> str:
     return f"mentions {rest[0]}"
 
 
+def _claim_text(c: Claim) -> str:
+    """How a claim reads in the demo: its own verb and, when given, the exact data type."""
+    neg = "NOT " if c.polarity == "deny" else ""
+    if c.kind == "practice":
+        return f"{neg}{c.practice}"
+    return f"{neg}{c.action or 'mentions'} {c.category}{f' > {c.subtype}' if c.subtype and c.subtype != c.category else ''}"
+
+
 def compare(doc: GoldDoc, claims: list[Claim], corpus: str) -> list[dict]:
-    """Per segment: what the experts labelled next to what the reader claimed, each marked as in MARKS."""
+    """Per segment: what the experts labelled next to what the reader claimed, each marked as in MARKS.
+    Items are (mark, label used for scoring, text to show, quote)."""
     scope = SCOPE[corpus]
     by_seg = defaultdict(list)
     for c in claims:
@@ -318,12 +327,13 @@ def compare(doc: GoldDoc, claims: list[Claim], corpus: str) -> list[dict]:
                 continue
             j = scope(c)
             if j is None:
-                items.append(("not_judged", shown, c.quote))
+                items.append(("not_judged", shown, _claim_text(c), c.quote))
             else:
                 lab = _demo_label(j)
                 judged.add(lab)
-                items.append(("found" if lab in expert else "false_alarm", shown, c.quote))
-        items += [("missed", lab, None) for lab in sorted(expert - judged, key=str)]
+                items.append(("found" if lab in expert else "false_alarm", shown, _claim_text(c), c.quote))
+        items = list(dict.fromkeys(items))  # the same claim found twice in one paragraph is shown once
+        items += [("missed", lab, _label_text(lab), None) for lab in sorted(expert - judged, key=str)]
         if items:
             rows.append({"seg": i, "text": doc.text[s:e], "items": items})
     return rows
@@ -358,9 +368,9 @@ def demo(extractor, corpus: str, root: Path, doc_id: str | None = None, split: s
     for row in rows:
         preview = " ".join(row["text"].split())
         print(f"\n[paragraph {row['seg']}] {preview[:220]}{'...' if len(preview) > 220 else ''}")
-        for mark, label, quote in row["items"]:
-            evidence = f'  "{" ".join(quote.split())[:110]}"' if quote else ""
-            print(f"   {MARKS[mark]} {_label_text(label):42}{evidence}")
+        for mark, _, text, quote in row["items"]:
+            evidence = f'  "{" ".join(quote.split())[:100]}"' if quote else ""
+            print(f"   {MARKS[mark]} {text:52}{evidence}")
     print(f"\n{len(rows)} of {len(doc.spans)} paragraphs had something to show; the rest said nothing the "
           "experts or the reader labelled.")
 
@@ -386,6 +396,11 @@ def demo(extractor, corpus: str, root: Path, doc_id: str | None = None, split: s
         replayed = f" ({stats['cached_windows']} answers replayed from cache)" if stats["cached_windows"] else ""
         print(f"{stats['windows']} model calls, {stats['failed_windows']} failed; "
               f"{stats['prompt_tokens'] + stats['completion_tokens']} tokens; {stats['seconds']:.0f}s{replayed}")
+        other = {k: v for k, v in stats["dropped"].items() if k not in ("not_found", "too_short", "elided")}
+        if other:
+            print(f"other problems counted: {other}")
+        for error in stats.get("errors", []):
+            print(f"   failed call: {error}")
 
 
 # ---------------------------------------------------------------- human annotation
